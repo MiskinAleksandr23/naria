@@ -21,7 +21,7 @@ pub const AtomicUsize = struct {
 
 threadlocal var lc: usize = 0;
 
-fn flappingCas(ptr: *AtomicUsize) void {
+fn flappingFetchAdd(ptr: *AtomicUsize) void {
     if (lc % 10 == 9) {
         const v = ptr.load(.seq_cst);
         ptr.store(v + 1, .seq_cst);
@@ -36,7 +36,7 @@ fn flappingCas(ptr: *AtomicUsize) void {
 const increments_per_thread = 20;
 
 fn worker(ptr: *AtomicUsize) void {
-    for (0..increments_per_thread) |_| flappingCas(ptr);
+    for (0..increments_per_thread) |_| flappingFetchAdd(ptr);
 }
 
 pub fn main(init: std.process.Init) !void {
