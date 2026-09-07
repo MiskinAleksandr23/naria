@@ -5,6 +5,7 @@ pub const RandomScheduler = @import("scheduler.zig").RandomScheduler;
 pub const ReplayScheduler = @import("scheduler.zig").ReplayScheduler;
 pub const Context = @import("context.zig").Context;
 pub const pause = @import("context.zig").pause;
+pub const pauseWithProbability = @import("context.zig").pauseWithProbability;
 
 test {
     _ = @import("runtime_test.zig");

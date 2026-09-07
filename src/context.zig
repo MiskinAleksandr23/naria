@@ -18,6 +18,7 @@ pub const Context = struct {
     cv: Io.Condition,
 
     state: State,
+    prgn: std.Random.DefaultPrng,
 
     pub fn setContext(ctx: *Context) void {
         std.debug.assert(localContext == null);
@@ -33,6 +34,7 @@ pub const Context = struct {
             .cv = .init,
             .state = .Ready,
             .io = io,
+            .prgn = .init(42),
         };
     }
 
@@ -49,10 +51,24 @@ pub const Context = struct {
             self.cv.waitUncancelable(self.io, &self.mx);
         }
     }
+    fn chance(random: std.Random, p: f64) bool {
+        return random.float(f64) < std.math.clamp(p, 0.0, 1.0);
+    }
+    pub fn pauseWithProbability(self: *Self, p: f64) void {
+        if (chance(self.prgn.random(), p)) {
+            self.pause();
+        }
+    }
 };
 
 pub fn pause() void {
     if (Context.getContext()) |ctx| {
         ctx.pause();
+    }
+}
+
+pub fn pauseWithProbability(p: f64) void {
+    if (Context.getContext()) |ctx| {
+        ctx.pauseWithProbability(p);
     }
 }

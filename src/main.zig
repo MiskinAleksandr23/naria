@@ -6,7 +6,7 @@ pub const AtomicUsize = struct {
     inner: std.atomic.Value(usize),
 
     pub fn load(self: *Self, comptime order: std.builtin.AtomicOrder) usize {
-        naria.pause();
+        naria.pauseWithProbability(0.5);
         const result = self.inner.load(order);
         naria.pause();
         return result;
@@ -15,25 +15,25 @@ pub const AtomicUsize = struct {
     pub fn store(self: *Self, value: usize, comptime order: std.builtin.AtomicOrder) void {
         naria.pause();
         self.inner.store(value, order);
-        naria.pause();
+        naria.pauseWithProbability(0.67);
     }
 };
 
 threadlocal var lc: usize = 0;
 
 fn flappingCas(ptr: *AtomicUsize) void {
-    if (lc % 100 == 99) {
+    if (lc % 10 == 9) {
         const v = ptr.load(.seq_cst);
         ptr.store(v + 1, .seq_cst);
     } else {
         naria.pause();
         _ = ptr.inner.fetchAdd(1, .seq_cst);
-        naria.pause();
+        naria.pauseWithProbability(0.42);
     }
     lc += 1;
 }
 
-const increments_per_thread = 1000;
+const increments_per_thread = 20;
 
 fn worker(ptr: *AtomicUsize) void {
     for (0..increments_per_thread) |_| flappingCas(ptr);
