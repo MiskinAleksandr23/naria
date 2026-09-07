@@ -46,10 +46,10 @@ pub fn main(init: std.process.Init) !void {
         init.io.random(std.mem.asBytes(&seed));
         var scheduler = naria.RandomScheduler.init(seed);
         var counter = AtomicUsize{ .inner = .init(0) };
-        var runtime = naria.Runtime.init(init.gpa, init.io);
+        var runtime = naria.Runtime.init(init.gpa, init.io, seed);
         defer runtime.deinit();
         errdefer {
-            std.debug.print("---- iteration {d} (seed {d}) ----\n", .{ iter, seed });
+            std.debug.print("---- iteration {d} (seed {d}) ----\n", .{ iter, runtime.seed });
             runtime.printTrace();
         }
 
@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
         const actual = counter.inner.load(.seq_cst);
         const expected = 2 * increments_per_thread;
         if (expected != actual) {
-            std.debug.print("---- iteration {d} (seed {d}) ----\n", .{ iter, seed });
+            std.debug.print("---- iteration {d} (seed {d}) ----\n", .{ iter, runtime.seed });
             runtime.printTrace();
             std.debug.print("Incorrect: expected {}, got {}\n", .{ expected, actual });
             break;

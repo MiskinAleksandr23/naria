@@ -18,7 +18,8 @@ pub const Context = struct {
     cv: Io.Condition,
 
     state: State,
-    prgn: std.Random.DefaultPrng,
+    seed: u64,
+    prng: std.Random.DefaultPrng,
 
     pub fn setContext(ctx: *Context) void {
         std.debug.assert(localContext == null);
@@ -28,13 +29,14 @@ pub const Context = struct {
         return localContext;
     }
 
-    pub fn init(io: Io) Self {
+    pub fn init(io: Io, seed: u64) Self {
         return Self{
             .mx = .init,
             .cv = .init,
             .state = .Ready,
             .io = io,
-            .prgn = .init(42),
+            .seed = seed,
+            .prng = .init(seed),
         };
     }
 
@@ -55,7 +57,7 @@ pub const Context = struct {
         return random.float(f64) < std.math.clamp(p, 0.0, 1.0);
     }
     pub fn pauseWithProbability(self: *Self, p: f64) void {
-        if (chance(self.prgn.random(), p)) {
+        if (chance(self.prng.random(), p)) {
             self.pause();
         }
     }

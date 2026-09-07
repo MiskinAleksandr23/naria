@@ -27,10 +27,11 @@ pub const Runtime = struct {
     runnable_buffer: std.ArrayList(ThreadId) = .empty,
     allocator: std.mem.Allocator,
     io: std.Io,
+    seed: u64,
     started: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) Self {
-        return .{ .allocator = allocator, .io = io };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, seed: u64) Self {
+        return .{ .allocator = allocator, .io = io, .seed = seed };
     }
 
     pub fn deinit(self: *Self) void {
@@ -84,9 +85,10 @@ pub const Runtime = struct {
         try self.threads.ensureUnusedCapacity(self.allocator, 1);
         try self.runnable_buffer.ensureTotalCapacity(self.allocator, self.threads.items.len + 1);
 
+        const tid = self.threads.items.len;
         const ctx = try self.allocator.create(Context);
         errdefer self.allocator.destroy(ctx);
-        ctx.* = .init(self.io);
+        ctx.* = .init(self.io, self.threadSeed(tid));
 
         const payload = try self.allocator.create(Payload);
         errdefer self.allocator.destroy(payload);
@@ -97,10 +99,14 @@ pub const Runtime = struct {
             .call = Payload.call,
             .destroy = Payload.destroy,
         };
-        const tid = self.threads.items.len;
         const thread = try std.Thread.spawn(.{}, threadWork, .{ ctx, task });
         self.threads.appendAssumeCapacity(.{ .thread = thread, .ctx = ctx, .task = task });
         return tid;
+    }
+
+    fn threadSeed(self: *const Self, tid: ThreadId) u64 {
+        var seeds = std.Random.SplitMix64.init(self.seed +% (@as(u64, @intCast(tid)) *% 0x9e3779b97f4a7c15));
+        return seeds.next();
     }
 
     pub fn hasWork(self: *Self) bool {

@@ -4,6 +4,7 @@ const ThreadId = @import("runtime.zig").ThreadId;
 const RandomScheduler = @import("scheduler.zig").RandomScheduler;
 const ReplayScheduler = @import("scheduler.zig").ReplayScheduler;
 const pause = @import("context.zig").pause;
+const pauseWithProbability = @import("context.zig").pauseWithProbability;
 const Counter = std.atomic.Value(usize);
 
 const Tasks = struct {
@@ -25,11 +26,48 @@ const Tasks = struct {
         pause();
         counter.store(value + 1, .seq_cst);
     }
+
+    fn probabilisticSteps(progress: *usize) void {
+        for (0..128) |checkpoint| {
+            progress.* = checkpoint;
+            pauseWithProbability(0.5);
+        }
+        progress.* = 128;
+    }
+};
+
+const ProbabilisticCounter = struct {
+    const Event = struct {
+        tid: ThreadId,
+        operation: enum { load, store },
+        value: usize,
+    };
+
+    counter: Counter = .init(0),
+    events: [64]Event = undefined,
+    event_count: usize = 0,
+
+    fn increment(self: *@This(), tid: ThreadId) void {
+        for (0..16) |_| {
+            pauseWithProbability(0.5);
+            const value = self.counter.load(.seq_cst);
+            self.record(.{ .tid = tid, .operation = .load, .value = value });
+            pauseWithProbability(if (value % 2 == 0) 0.67 else 0.25);
+            self.counter.store(value + 1, .seq_cst);
+            self.record(.{ .tid = tid, .operation = .store, .value = value + 1 });
+            pauseWithProbability(0.42);
+        }
+    }
+
+    fn record(self: *@This(), event: Event) void {
+        self.events[self.event_count] = event;
+        self.event_count += 1;
+    }
 };
 
 test "registration waits for the scheduler and completed threads are excluded" {
     var counter = Counter.init(0);
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
     defer runtime.deinit();
 
     const first = try runtime.spawn(Tasks.add, .{ &counter, @as(usize, 1) });
@@ -54,7 +92,7 @@ test "registration waits for the scheduler and completed threads are excluded" {
 
 test "a long task is scheduled through every pause including its final resume" {
     var counter = Counter.init(0);
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
     defer runtime.deinit();
     _ = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 64) });
     _ = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 64) });
@@ -73,7 +111,7 @@ test "a long task is scheduled through every pause including its final resume" {
 
 test "recorded choices reproduce a lost update and the complete trace" {
     var counter = Counter.init(0);
-    var first = Runtime.init(std.testing.allocator, std.testing.io);
+    var first = Runtime.init(std.testing.allocator, std.testing.io, 42);
     defer first.deinit();
     _ = try first.spawn(Tasks.brokenIncrement, .{&counter});
     _ = try first.spawn(Tasks.brokenIncrement, .{&counter});
@@ -84,7 +122,7 @@ test "recorded choices reproduce a lost update and the complete trace" {
     const choices = try first.recordedChoices(std.testing.allocator);
     defer std.testing.allocator.free(choices);
     counter.store(0, .seq_cst);
-    var second = Runtime.init(std.testing.allocator, std.testing.io);
+    var second = Runtime.init(std.testing.allocator, std.testing.io, first.seed);
     defer second.deinit();
     _ = try second.spawn(Tasks.brokenIncrement, .{&counter});
     _ = try second.spawn(Tasks.brokenIncrement, .{&counter});
@@ -96,7 +134,7 @@ test "recorded choices reproduce a lost update and the complete trace" {
 
 test "same seed reproduces the execution independently of native thread startup" {
     var first_counter = Counter.init(0);
-    var first = Runtime.init(std.testing.allocator, std.testing.io);
+    var first = Runtime.init(std.testing.allocator, std.testing.io, 42);
     defer first.deinit();
     _ = try first.spawn(Tasks.repeat, .{ &first_counter, @as(usize, 20) });
     _ = try first.spawn(Tasks.repeat, .{ &first_counter, @as(usize, 20) });
@@ -104,7 +142,7 @@ test "same seed reproduces the execution independently of native thread startup"
     try first.run(&first_scheduler);
 
     var second_counter = Counter.init(0);
-    var second = Runtime.init(std.testing.allocator, std.testing.io);
+    var second = Runtime.init(std.testing.allocator, std.testing.io, first.seed);
     defer second.deinit();
     _ = try second.spawn(Tasks.repeat, .{ &second_counter, @as(usize, 20) });
     _ = try second.spawn(Tasks.repeat, .{ &second_counter, @as(usize, 20) });
@@ -115,9 +153,79 @@ test "same seed reproduces the execution independently of native thread startup"
     try std.testing.expectEqualDeep(first.trace.items, second.trace.items);
 }
 
+test "runtime seed reproduces probabilistic pauses with replay and random scheduling" {
+    for ([_]u64{ 0, 1, 42, std.math.maxInt(u64) }) |seed| {
+        var first_state: ProbabilisticCounter = .{};
+        var first = Runtime.init(std.testing.allocator, std.testing.io, seed);
+        defer first.deinit();
+        _ = try first.spawn(ProbabilisticCounter.increment, .{ &first_state, @as(ThreadId, 0) });
+        _ = try first.spawn(ProbabilisticCounter.increment, .{ &first_state, @as(ThreadId, 1) });
+        var scheduler = RandomScheduler.init(1234);
+        try first.run(&scheduler);
+        try std.testing.expectEqual(seed, first.seed);
+        try std.testing.expectEqual(first_state.events.len, first_state.event_count);
+
+        const choices = try first.recordedChoices(std.testing.allocator);
+        defer std.testing.allocator.free(choices);
+
+        var replay_state: ProbabilisticCounter = .{};
+        var second = Runtime.init(std.testing.allocator, std.testing.io, first.seed);
+        defer second.deinit();
+        _ = try second.spawn(ProbabilisticCounter.increment, .{ &replay_state, @as(ThreadId, 0) });
+        _ = try second.spawn(ProbabilisticCounter.increment, .{ &replay_state, @as(ThreadId, 1) });
+        var replay = ReplayScheduler.init(choices);
+        try second.run(&replay);
+
+        try std.testing.expectEqual(replay_state.events.len, replay_state.event_count);
+        try std.testing.expectEqual(first_state.counter.load(.seq_cst), replay_state.counter.load(.seq_cst));
+        try std.testing.expectEqualDeep(first_state.events, replay_state.events);
+        try std.testing.expectEqualDeep(first.trace.items, second.trace.items);
+
+        var repeated_state: ProbabilisticCounter = .{};
+        var repeated = Runtime.init(std.testing.allocator, std.testing.io, first.seed);
+        defer repeated.deinit();
+        _ = try repeated.spawn(ProbabilisticCounter.increment, .{ &repeated_state, @as(ThreadId, 0) });
+        _ = try repeated.spawn(ProbabilisticCounter.increment, .{ &repeated_state, @as(ThreadId, 1) });
+        var repeated_scheduler = RandomScheduler.init(1234);
+        try repeated.run(&repeated_scheduler);
+
+        try std.testing.expectEqual(repeated_state.events.len, repeated_state.event_count);
+        try std.testing.expectEqual(first_state.counter.load(.seq_cst), repeated_state.counter.load(.seq_cst));
+        try std.testing.expectEqualDeep(first_state.events, repeated_state.events);
+        try std.testing.expectEqualDeep(first.trace.items, repeated.trace.items);
+    }
+}
+
+test "runtime seed and thread ID vary the actual probabilistic pause locations" {
+    var locations: [2][2][129]usize = undefined;
+    var counts = [2][2]usize{ .{ 0, 0 }, .{ 0, 0 } };
+    for ([_]u64{ 0, std.math.maxInt(u64) }, 0..) |seed, run_index| {
+        var progress = [2]usize{ 0, 0 };
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, seed);
+        defer runtime.deinit();
+        for (&progress) |*checkpoint| {
+            _ = try runtime.spawn(Tasks.probabilisticSteps, .{checkpoint});
+        }
+
+        while (runtime.hasWork()) {
+            for (runtime.runnable()) |tid| {
+                try runtime.step(tid);
+                locations[run_index][tid][counts[run_index][tid]] = progress[tid];
+                counts[run_index][tid] += 1;
+            }
+        }
+    }
+
+    const first_thread = locations[0][0][0..counts[0][0]];
+    const second_thread = locations[0][1][0..counts[0][1]];
+    const other_seed = locations[1][0][0..counts[1][0]];
+    try std.testing.expect(!std.mem.eql(usize, first_thread, second_thread));
+    try std.testing.expect(!std.mem.eql(usize, first_thread, other_seed));
+}
+
 test "contexts remain valid when thread storage grows" {
     var counter = Counter.init(0);
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
     defer runtime.deinit();
     for (0..12) |_| {
         _ = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 2) });
@@ -131,13 +239,13 @@ test "contexts remain valid when thread storage grows" {
 test "deinit cancels an unstarted scenario and drains a started scenario" {
     var counter = Counter.init(0);
     {
-        var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
         defer runtime.deinit();
         _ = try runtime.spawn(Tasks.add, .{ &counter, @as(usize, 100) });
     }
     try std.testing.expectEqual(@as(usize, 0), counter.load(.seq_cst));
     {
-        var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
         defer runtime.deinit();
         const tid = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 3) });
         _ = try runtime.spawn(Tasks.add, .{ &counter, @as(usize, 100) });
@@ -163,7 +271,7 @@ test "failure cleanup also schedules the task a paused worker is waiting for" {
     };
     var state: Handoff = .{};
     {
-        var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
         defer runtime.deinit();
         const receiver = try runtime.spawn(Handoff.receive, .{&state});
         _ = try runtime.spawn(Handoff.send, .{&state});
@@ -196,14 +304,14 @@ test "replay rejects unavailable IDs, exhaustion and unused choices" {
 test "runtime rejects truncated and overlong replays" {
     var counter = Counter.init(0);
     {
-        var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
         defer runtime.deinit();
         _ = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 1) });
         var replay = ReplayScheduler.init(&.{0});
         try std.testing.expectError(error.ReplayExhausted, runtime.run(&replay));
     }
     {
-        var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
         defer runtime.deinit();
         _ = try runtime.spawn(Tasks.add, .{ &counter, @as(usize, 1) });
         var replay = ReplayScheduler.init(&.{ 0, 0 });
@@ -212,7 +320,7 @@ test "runtime rejects truncated and overlong replays" {
 }
 
 test "empty runtime completes without requesting a scheduling decision" {
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io);
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, 42);
     defer runtime.deinit();
     var replay = ReplayScheduler.init(&.{});
     try runtime.run(&replay);
@@ -222,7 +330,7 @@ test "empty runtime completes without requesting a scheduling decision" {
 
 fn allocationScenario(allocator: std.mem.Allocator) !void {
     var counter = Counter.init(0);
-    var runtime = Runtime.init(allocator, std.testing.io);
+    var runtime = Runtime.init(allocator, std.testing.io, 42);
     defer runtime.deinit();
     _ = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 20) });
     _ = try runtime.spawn(Tasks.repeat, .{ &counter, @as(usize, 20) });
