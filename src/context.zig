@@ -2,14 +2,13 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const State = enum {
-    const Self = @This();
     Ready,
     Running,
     Paused,
+    Finished,
 };
 
 threadlocal var localContext: ?*Context = null;
-threadlocal var threadIdx: usize = 0;
 
 pub const Context = struct {
     const Self = @This();
@@ -24,10 +23,6 @@ pub const Context = struct {
         std.debug.assert(localContext == null);
         localContext = ctx;
     }
-    pub fn setThreadId(id: usize) void {
-        threadIdx = id;
-    }
-
     pub fn getContext() ?*Context {
         return localContext;
     }
